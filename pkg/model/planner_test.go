@@ -22,8 +22,8 @@ func TestPlanner(t *testing.T) {
 		{"invalid-job-name/invalid-2.yml", "workflow is not valid. 'invalid-job-name-2': Job name '1234invalid-JOB-Name-v123-docker_hub' is invalid. Names must start with a letter or '_' and contain only alphanumeric characters, '-', or '_'", false},
 		{"invalid-job-name/valid-1.yml", "", false},
 		{"invalid-job-name/valid-2.yml", "", false},
-		{"empty-workflow", "unable to read workflow, push.yml file is empty: EOF", false},
-		{"nested", "unable to read workflow, fail.yml file is empty: EOF", false},
+		{"empty-workflow", "unable to read workflow 'push.yml': file is empty: EOF", false},
+		{"nested", "unable to read workflow 'fail.yml': file is empty: EOF", false},
 		{"nested", "", true},
 	}
 
@@ -38,4 +38,21 @@ func TestPlanner(t *testing.T) {
 			assert.EqualError(t, err, table.errorMessage)
 		}
 	}
+}
+
+func TestWorkflow(t *testing.T) {
+	log.SetLevel(log.DebugLevel)
+
+	workflow := Workflow{
+		Jobs: map[string]*Job{
+			"valid_job": {
+				Name: "valid_job",
+			},
+		},
+	}
+
+	// Check that a valid job id returns non-error
+	result, err := createStages(&workflow, "valid_job")
+	assert.Nil(t, err)
+	assert.NotNil(t, result)
 }

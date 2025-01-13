@@ -1,48 +1,56 @@
-# yaml-language-server: $schema=https://schemastore.pages.dev/schemas/json/golangci-lint.json
-# Your editor might complain about invalid types, but this is correct config
-# above schema should prevent editor from "shouting" about this
-# Minimum golangci-lint version required: v1.40.0
+# Minimum golangci-lint version required: v1.46.0
 run:
   timeout: 3m
+
+issues:
+  exclude-dirs:
+    - report # megalinter results+fixes
+  max-issues-per-linter: 0
+  max-same-issues: 0
 
 linters-settings:
   gocyclo:
     # minimal code complexity to report, 30 by default (but we recommend 10-20)
-    min-complexity: 15
+    min-complexity: 20
   gocritic:
     disabled-checks:
       - ifElseChain
   importas:
-    aliases:
+    alias:
       - pkg: 'github.com/sirupsen/logrus'
         alias: log
       - pkg: 'github.com/stretchr/testify/assert'
         alias: assert
   depguard:
-    list-type: blacklist
-    include-go-root: true
-    packages:
-      - gotest.tools/v3/assert
-      - log
-    packages-with-error-message:
-      - gotest.tools/v3: 'Please keep tests unified using only github.com/stretchr/testify'
-      - log: 'Please keep logging unified using only github.com/sirupsen/logrus'
-
+    rules:
+      main:
+        deny:
+          - pkg: github.com/pkg/errors
+            desc: Please use "errors" package from standard library
+          - pkg: gotest.tools/v3
+            desc: Please keep tests unified using only github.com/stretchr/testify
+          - pkg: log
+            desc: Please keep logging unified using only github.com/sirupsen/logrus
 linters:
   enable:
-    - megacheck
+    - gosimple
+    - staticcheck
+    - unused
     - govet
-    - golint
+    - revive
     - gocyclo
     - gosec
     - unconvert
     - dupl
     - nakedret
     - prealloc
-    - exportloopref
+    - copyloopvar
     - gocritic
     - goimports
     - whitespace
     - misspell
     - depguard
     - importas
+    - contextcheck
+    - nolintlint
+    - revive
