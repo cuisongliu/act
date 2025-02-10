@@ -3,21 +3,21 @@ package model
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
 // WorkflowPlanner contains methods for creating plans
 type WorkflowPlanner interface {
-	PlanEvent(eventName string) *Plan
-	PlanJob(jobName string) *Plan
+	PlanEvent(eventName string) (*Plan, error)
+	PlanJob(jobName string) (*Plan, error)
+	PlanAll() (*Plan, error)
 	GetEvents() []string
 }
 
@@ -50,47 +50,12 @@ func (r *Run) Job() *Job {
 	return r.Workflow.GetJob(r.JobID)
 }
 
-// Helper function for FixIfstatement
-func FixIfStatement1(val string, lines [][][]byte, l int) (string, error) {
-	if val != "" {
-		line := lines[l-1][0]
-		outcome := regexp.MustCompile(`\s+if:\s+".*".*`).FindSubmatch(line)
-		if outcome != nil {
-			oldLines := regexp.MustCompile(`"(.*?)"`).FindAllSubmatch(line, 2)
-			val = "${{" + string(oldLines[0][1]) + "}}"
-		}
-	}
-	return val, nil
-}
-
-// Fixes faulty if statements from decoder
-func FixIfStatement(content []byte, wr *Workflow) error {
-	jobs := wr.Jobs
-	lines := regexp.MustCompile(".*\n|.+$").FindAllSubmatch(content, -1)
-	for j := range jobs {
-		val, err := FixIfStatement1(jobs[j].If.Value, lines, jobs[j].If.Line)
-		if err != nil {
-			return err
-		}
-		jobs[j].If.Value = val
-		for i := range jobs[j].Steps {
-			val, err = FixIfStatement1(jobs[j].Steps[i].If.Value, lines, jobs[j].Steps[i].If.Line)
-			if err != nil {
-				return err
-			}
-			jobs[j].Steps[i].If.Value = val
-		}
-	}
-	return nil
-}
-
 type WorkflowFiles struct {
-	workflowFileInfo os.FileInfo
+	workflowDirEntry os.DirEntry
 	dirPath          string
 }
 
 // NewWorkflowPlanner will load a specific workflow, all workflows from a directory or all workflows from a directory and its subdirectories
-// nolint: gocyclo
 func NewWorkflowPlanner(path string, noWorkflowRecurse bool) (WorkflowPlanner, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
@@ -107,7 +72,7 @@ func NewWorkflowPlanner(path string, noWorkflowRecurse bool) (WorkflowPlanner, e
 	if fi.IsDir() {
 		log.Debugf("Loading workflows from '%s'", path)
 		if noWorkflowRecurse {
-			files, err := ioutil.ReadDir(path)
+			files, err := os.ReadDir(path)
 			if err != nil {
 				return nil, err
 			}
@@ -115,7 +80,7 @@ func NewWorkflowPlanner(path string, noWorkflowRecurse bool) (WorkflowPlanner, e
 			for _, v := range files {
 				workflows = append(workflows, WorkflowFiles{
 					dirPath:          path,
-					workflowFileInfo: v,
+					workflowDirEntry: v,
 				})
 			}
 		} else {
@@ -130,7 +95,7 @@ func NewWorkflowPlanner(path string, noWorkflowRecurse bool) (WorkflowPlanner, e
 						log.Debugf("Found workflow '%s' in '%s'", f.Name(), p)
 						workflows = append(workflows, WorkflowFiles{
 							dirPath:          filepath.Dir(p),
-							workflowFileInfo: f,
+							workflowDirEntry: fs.FileInfoToDirEntry(f),
 						})
 					}
 
@@ -145,18 +110,15 @@ func NewWorkflowPlanner(path string, noWorkflowRecurse bool) (WorkflowPlanner, e
 
 		workflows = append(workflows, WorkflowFiles{
 			dirPath:          dirname,
-			workflowFileInfo: fi,
+			workflowDirEntry: fs.FileInfoToDirEntry(fi),
 		})
-	}
-	if err != nil {
-		return nil, err
 	}
 
 	wp := new(workflowPlanner)
 	for _, wf := range workflows {
-		ext := filepath.Ext(wf.workflowFileInfo.Name())
+		ext := filepath.Ext(wf.workflowDirEntry.Name())
 		if ext == ".yml" || ext == ".yaml" {
-			f, err := os.Open(filepath.Join(wf.dirPath, wf.workflowFileInfo.Name()))
+			f, err := os.Open(filepath.Join(wf.dirPath, wf.workflowDirEntry.Name()))
 			if err != nil {
 				return nil, err
 			}
@@ -164,45 +126,71 @@ func NewWorkflowPlanner(path string, noWorkflowRecurse bool) (WorkflowPlanner, e
 			log.Debugf("Reading workflow '%s'", f.Name())
 			workflow, err := ReadWorkflow(f)
 			if err != nil {
-				f.Close()
+				_ = f.Close()
 				if err == io.EOF {
-					return nil, errors.WithMessagef(err, "unable to read workflow, %s file is empty", wf.workflowFileInfo.Name())
+					return nil, fmt.Errorf("unable to read workflow '%s': file is empty: %w", wf.workflowDirEntry.Name(), err)
 				}
-				return nil, err
+				return nil, fmt.Errorf("workflow is not valid. '%s': %w", wf.workflowDirEntry.Name(), err)
 			}
 			_, err = f.Seek(0, 0)
 			if err != nil {
-				f.Close()
-				return nil, errors.WithMessagef(err, "error occurring when resetting io pointer, %s", wf.workflowFileInfo.Name())
-			}
-			log.Debugf("Correcting if statements '%s'", f.Name())
-			content, err := ioutil.ReadFile(filepath.Join(wf.dirPath, wf.workflowFileInfo.Name()))
-			if err != nil {
-				return nil, errors.WithMessagef(err, "error occurring when reading file, %s", wf.workflowFileInfo.Name())
+				_ = f.Close()
+				return nil, fmt.Errorf("error occurring when resetting io pointer in '%s': %w", wf.workflowDirEntry.Name(), err)
 			}
 
-			err = FixIfStatement(content, workflow)
+			workflow.File = wf.workflowDirEntry.Name()
+			if workflow.Name == "" {
+				workflow.Name = wf.workflowDirEntry.Name()
+			}
+
+			err = validateJobName(workflow)
 			if err != nil {
+				_ = f.Close()
 				return nil, err
 			}
 
-			if workflow.Name == "" {
-				workflow.Name = wf.workflowFileInfo.Name()
-			}
-
-			jobNameRegex := regexp.MustCompile(`^([[:alpha:]_][[:alnum:]_\-]*)$`)
-			for k := range workflow.Jobs {
-				if ok := jobNameRegex.MatchString(k); !ok {
-					return nil, fmt.Errorf("workflow is not valid. '%s': Job name '%s' is invalid. Names must start with a letter or '_' and contain only alphanumeric characters, '-', or '_'", workflow.Name, k)
-				}
-			}
-
 			wp.workflows = append(wp.workflows, workflow)
-			f.Close()
+			_ = f.Close()
 		}
 	}
 
 	return wp, nil
+}
+
+func NewSingleWorkflowPlanner(name string, f io.Reader) (WorkflowPlanner, error) {
+	wp := new(workflowPlanner)
+
+	log.Debugf("Reading workflow %s", name)
+	workflow, err := ReadWorkflow(f)
+	if err != nil {
+		if err == io.EOF {
+			return nil, fmt.Errorf("unable to read workflow '%s': file is empty: %w", name, err)
+		}
+		return nil, fmt.Errorf("workflow is not valid. '%s': %w", name, err)
+	}
+	workflow.File = name
+	if workflow.Name == "" {
+		workflow.Name = name
+	}
+
+	err = validateJobName(workflow)
+	if err != nil {
+		return nil, err
+	}
+
+	wp.workflows = append(wp.workflows, workflow)
+
+	return wp, nil
+}
+
+func validateJobName(workflow *Workflow) error {
+	jobNameRegex := regexp.MustCompile(`^([[:alpha:]_][[:alnum:]_\-]*)$`)
+	for k := range workflow.Jobs {
+		if ok := jobNameRegex.MatchString(k); !ok {
+			return fmt.Errorf("workflow is not valid. '%s': Job name '%s' is invalid. Names must start with a letter or '_' and contain only alphanumeric characters, '-', or '_'", workflow.Name, k)
+		}
+	}
+	return nil
 }
 
 type workflowPlanner struct {
@@ -210,33 +198,76 @@ type workflowPlanner struct {
 }
 
 // PlanEvent builds a new list of runs to execute in parallel for an event name
-func (wp *workflowPlanner) PlanEvent(eventName string) *Plan {
+func (wp *workflowPlanner) PlanEvent(eventName string) (*Plan, error) {
 	plan := new(Plan)
 	if len(wp.workflows) == 0 {
-		log.Debugf("no events found for workflow: %s", eventName)
+		log.Debug("no workflows found by planner")
+		return plan, nil
 	}
+	var lastErr error
 
 	for _, w := range wp.workflows {
-		for _, e := range w.On() {
+		events := w.On()
+		if len(events) == 0 {
+			log.Debugf("no events found for workflow: %s", w.File)
+			continue
+		}
+
+		for _, e := range events {
 			if e == eventName {
-				plan.mergeStages(createStages(w, w.GetJobIDs()...))
+				stages, err := createStages(w, w.GetJobIDs()...)
+				if err != nil {
+					log.Warn(err)
+					lastErr = err
+				} else {
+					plan.mergeStages(stages)
+				}
 			}
 		}
 	}
-	return plan
+	return plan, lastErr
 }
 
 // PlanJob builds a new run to execute in parallel for a job name
-func (wp *workflowPlanner) PlanJob(jobName string) *Plan {
+func (wp *workflowPlanner) PlanJob(jobName string) (*Plan, error) {
 	plan := new(Plan)
 	if len(wp.workflows) == 0 {
 		log.Debugf("no jobs found for workflow: %s", jobName)
 	}
+	var lastErr error
 
 	for _, w := range wp.workflows {
-		plan.mergeStages(createStages(w, jobName))
+		stages, err := createStages(w, jobName)
+		if err != nil {
+			log.Warn(err)
+			lastErr = err
+		} else {
+			plan.mergeStages(stages)
+		}
 	}
-	return plan
+	return plan, lastErr
+}
+
+// PlanAll builds a new run to execute in parallel all
+func (wp *workflowPlanner) PlanAll() (*Plan, error) {
+	plan := new(Plan)
+	if len(wp.workflows) == 0 {
+		log.Debug("no workflows found by planner")
+		return plan, nil
+	}
+	var lastErr error
+
+	for _, w := range wp.workflows {
+		stages, err := createStages(w, w.GetJobIDs()...)
+		if err != nil {
+			log.Warn(err)
+			lastErr = err
+		} else {
+			plan.mergeStages(stages)
+		}
+	}
+
+	return plan, lastErr
 }
 
 // GetEvents gets all the events in the workflows file
@@ -309,7 +340,7 @@ func (p *Plan) mergeStages(stages []*Stage) {
 	p.Stages = newStages
 }
 
-func createStages(w *Workflow, jobIDs ...string) []*Stage {
+func createStages(w *Workflow, jobIDs ...string) ([]*Stage, error) {
 	// first, build a list of all the necessary jobs to run, and their dependencies
 	jobDependencies := make(map[string][]string)
 	for len(jobIDs) > 0 {
@@ -341,12 +372,12 @@ func createStages(w *Workflow, jobIDs ...string) []*Stage {
 			}
 		}
 		if len(stage.Runs) == 0 {
-			log.Fatalf("Unable to build dependency graph!")
+			return nil, fmt.Errorf("unable to build dependency graph for %s (%s)", w.Name, w.File)
 		}
 		stages = append(stages, stage)
 	}
 
-	return stages
+	return stages, nil
 }
 
 // return true iff all strings in srcList exist in at least one of the stages

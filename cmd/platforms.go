@@ -6,20 +6,16 @@ import (
 
 func (i *Input) newPlatforms() map[string]string {
 	platforms := map[string]string{
-		"ubuntu-latest":  "node:12.20.1-buster-slim",
-		"ubuntu-20.04":   "node:12.20.1-buster-slim",
-		"ubuntu-18.04":   "node:12.20.1-buster-slim",
-		"ubuntu-16.04":   "node:12.20.1-stretch-slim",
-		"windows-latest": "",
-		"windows-2019":   "",
-		"macos-latest":   "",
-		"macos-10.15":    "",
+		"ubuntu-latest": "node:16-buster-slim",
+		"ubuntu-22.04":  "node:16-bullseye-slim",
+		"ubuntu-20.04":  "node:16-buster-slim",
+		"ubuntu-18.04":  "node:16-buster-slim",
 	}
 
 	for _, p := range i.platforms {
 		pParts := strings.Split(p, "=")
 		if len(pParts) == 2 {
-			platforms[pParts[0]] = pParts[1]
+			platforms[strings.ToLower(pParts[0])] = pParts[1]
 		}
 	}
 	return platforms
